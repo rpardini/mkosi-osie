@@ -1,0 +1,13 @@
+[Unit]
+Description=CaptainOS Banner
+After=systemd-networkd.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/captainos-banner
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

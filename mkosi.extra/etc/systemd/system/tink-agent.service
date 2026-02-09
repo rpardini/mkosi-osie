@@ -1,0 +1,31 @@
+[Unit]
+Description=Tinkerbell Agent
+After=tink-agent-setup.service containerd.service network-online.target journal-bridge.service
+Requires=tink-agent-setup.service containerd.service
+Wants=network-online.target journal-bridge.service
+# Only start when Tinkerbell parameters are on the kernel command line
+ConditionKernelCommandLine=|tink_worker_image
+ConditionKernelCommandLine=|docker_registry
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/tink-agent.env
+ExecStart=/usr/local/bin/tink-agent-start
+
+# Failure handling — restart with backoff
+Restart=always
+RestartSec=5
+RestartMaxDelaySec=60
+RestartSteps=5
+
+# Logging to journal (forwarded to syslog by tink-agent-syslog-fwd)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tink-agent
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

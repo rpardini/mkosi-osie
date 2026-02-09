@@ -1,0 +1,222 @@
+#!/bin/bash
+# /usr/local/bin/tink-agent-setup — Pull the tink-agent container image
+# and extract the binary for direct execution on the host.
+#
+# Reads configuration from /proc/cmdline (same parameters as hook-bootkit):
+#   tink_worker_image=<image>       Full image reference (takes precedence)
+#   docker_registry=<registry>      Registry host (builds <registry>/tink-agent:latest)
+#   registry_username=<user>        Registry auth username
+#   registry_password=<pass>        Registry auth password
+#   tinkerbell_tls=<bool>           Enable TLS for tink-server
+#   tinkerbell_insecure_tls=<bool>  Allow insecure TLS
+#   insecure_registries=<list>      Comma-separated insecure registries
+
+set -euo pipefail
+
+TINK_AGENT_BIN="/tink-agent"
+EXTRACT_DIR="/var/lib/tink-agent"
+
+# --- Parse /proc/cmdline ---
+parse_cmdline() {
+    local cmdline
+    cmdline=$(cat /proc/cmdline)
+
+    for param in $cmdline; do
+        case "$param" in
+            tink_worker_image=*)       TINK_IMAGE="${param#*=}" ;;
+            docker_registry=*)         DOCKER_REGISTRY="${param#*=}" ;;
+            registry_username=*)       REGISTRY_USERNAME="${param#*=}" ;;
+            registry_password=*)       REGISTRY_PASSWORD="${param#*=}" ;;
+            grpc_authority=*)          GRPC_AUTHORITY="${param#*=}" ;;
+            worker_id=*)               WORKER_ID="${param#*=}" ;;
+            tinkerbell_tls=*)          TINKERBELL_TLS="${param#*=}" ;;
+            tinkerbell_insecure_tls=*) TINKERBELL_INSECURE_TLS="${param#*=}" ;;
+            syslog_host=*)             SYSLOG_HOST="${param#*=}" ;;
+            insecure_registries=*)     INSECURE_REGISTRIES="${param#*=}" ;;
+            HTTP_PROXY=*)              HTTP_PROXY="${param#*=}" ;;
+            HTTPS_PROXY=*)             HTTPS_PROXY="${param#*=}" ;;
+            NO_PROXY=*)                NO_PROXY="${param#*=}" ;;
+            facility=*)                FACILITY="${param#*=}" ;;
+        esac
+    done
+
+    # Build image reference if not explicitly set
+    if [[ -z "${TINK_IMAGE:-}" ]]; then
+        local registry="${DOCKER_REGISTRY:-ghcr.io/tinkerbell}"
+        TINK_IMAGE="${registry}/tink-agent:latest"
+    fi
+
+    export TINK_IMAGE DOCKER_REGISTRY REGISTRY_USERNAME REGISTRY_PASSWORD
+    export GRPC_AUTHORITY WORKER_ID TINKERBELL_TLS TINKERBELL_INSECURE_TLS
+    export SYSLOG_HOST HTTP_PROXY HTTPS_PROXY NO_PROXY FACILITY
+}
+
+# --- Configure insecure registries for containerd ---
+configure_insecure_registries() {
+    if [[ -z "${INSECURE_REGISTRIES:-}" ]]; then
+        return
+    fi
+
+    echo "Configuring insecure registries: ${INSECURE_REGISTRIES}"
+    local certs_dir="/etc/containerd/certs.d"
+
+    IFS=',' read -ra REGISTRIES <<< "$INSECURE_REGISTRIES"
+    for registry in "${REGISTRIES[@]}"; do
+        registry=$(echo "$registry" | xargs)  # trim whitespace
+        [[ -z "$registry" ]] && continue
+        mkdir -p "${certs_dir}/${registry}"
+        cat > "${certs_dir}/${registry}/hosts.toml" <<EOF
+server = "http://${registry}"
+
+[host."http://${registry}"]
+  capabilities = ["pull", "resolve", "push"]
+  skip_verify = true
+EOF
+        echo "  Configured: ${registry}"
+    done
+}
+
+# --- Wait for containerd ---
+wait_for_containerd() {
+    local max_attempts=30
+    local attempt=0
+    local sock="/run/containerd/containerd.sock"
+    echo "Waiting for containerd socket at ${sock}..."
+    while [[ ! -S "$sock" ]]; do
+        attempt=$((attempt + 1))
+        if [[ $attempt -ge $max_attempts ]]; then
+            echo "ERROR: containerd socket did not appear after ${max_attempts}s"
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "containerd is ready."
+}
+
+# --- Pull the tink-agent image ---
+pull_image() {
+    echo "Pulling tink-agent image: ${TINK_IMAGE}"
+
+    local max_attempts=5
+    local attempt=0
+    local wait_time=2
+
+    while true; do
+        attempt=$((attempt + 1))
+        if nerdctl pull "${TINK_IMAGE}" 2>&1; then
+            echo "Image pulled successfully."
+            return 0
+        fi
+
+        if [[ $attempt -ge $max_attempts ]]; then
+            echo "ERROR: Failed to pull image after ${max_attempts} attempts"
+            exit 1
+        fi
+
+        echo "Pull attempt ${attempt} failed, retrying in ${wait_time}s..."
+        sleep "$wait_time"
+        wait_time=$((wait_time * 2))
+    done
+}
+
+# --- Extract the tink-agent binary from the image ---
+extract_binary() {
+    echo "Extracting tink-agent binary from image..."
+    mkdir -p "$EXTRACT_DIR"
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    # Save the image as a tar archive
+    echo "Saving image to tar..."
+    nerdctl save "${TINK_IMAGE}" > "${tmpdir}/image.tar"
+    tar -xf "${tmpdir}/image.tar" -C "${tmpdir}"
+
+    local found=0
+    local bin_paths="usr/bin/tink-agent tink-agent usr/local/bin/tink-agent usr/bin/tink-worker"
+
+    # Docker/nerdctl format: look for layer.tar files
+    while IFS= read -r layer; do
+        for bin_path in $bin_paths; do
+            if tar -xf "$layer" -C "$EXTRACT_DIR" "$bin_path" 2>/dev/null; then
+                echo "Extracted ${bin_path} from layer $(basename "$layer")"
+                found=1
+                break 2
+            fi
+        done
+    done < <(find "${tmpdir}" -name 'layer.tar' 2>/dev/null)
+
+    # OCI format: layer blobs are gzipped tars under blobs/sha256/
+    if [[ "$found" -eq 0 ]]; then
+        while IFS= read -r blob; do
+            for bin_path in $bin_paths; do
+                if tar -xzf "$blob" -C "$EXTRACT_DIR" "$bin_path" 2>/dev/null || \
+                   tar -xf "$blob" -C "$EXTRACT_DIR" "$bin_path" 2>/dev/null; then
+                    echo "Extracted ${bin_path} from blob $(basename "$blob")"
+                    found=1
+                    break 2
+                fi
+            done
+        done < <(find "${tmpdir}/blobs" -type f 2>/dev/null)
+    fi
+
+    if [[ "$found" -eq 1 ]]; then
+        # Find the extracted binary file and install it
+        local extracted
+        extracted=$(find "$EXTRACT_DIR" -type f \( -name 'tink-agent' -o -name 'tink-worker' \) 2>/dev/null | head -1)
+        if [[ -n "$extracted" ]]; then
+            cp "$extracted" "${TINK_AGENT_BIN}"
+            chmod +x "${TINK_AGENT_BIN}"
+            echo "Installed tink-agent to ${TINK_AGENT_BIN}"
+        fi
+    fi
+
+    rm -rf "${tmpdir}"
+
+    if [[ "$found" -eq 0 ]] || [[ ! -x "${TINK_AGENT_BIN}" ]]; then
+        echo "ERROR: Could not find tink-agent binary in the container image"
+        echo "Image layers contained:"
+        nerdctl save "${TINK_IMAGE}" | tar -tf - 2>/dev/null | head -30 || true
+        exit 1
+    fi
+}
+
+# --- Write environment file for the systemd unit ---
+write_env_file() {
+    local env_file="/etc/tink-agent.env"
+    echo "Writing tink-agent environment to ${env_file}"
+
+    cat > "$env_file" <<EOF
+# Auto-generated by tink-agent-setup from /proc/cmdline
+TINKERBELL_GRPC_AUTHORITY=${GRPC_AUTHORITY:-}
+WORKER_ID=${WORKER_ID:-}
+TINKERBELL_TLS=${TINKERBELL_TLS:-false}
+TINKERBELL_INSECURE_TLS=${TINKERBELL_INSECURE_TLS:-false}
+DOCKER_REGISTRY=${DOCKER_REGISTRY:-}
+REGISTRY_USERNAME=${REGISTRY_USERNAME:-}
+REGISTRY_PASSWORD=${REGISTRY_PASSWORD:-}
+EOF
+
+    [[ -n "${HTTP_PROXY:-}" ]]  && echo "HTTP_PROXY=${HTTP_PROXY}" >> "$env_file"
+    [[ -n "${HTTPS_PROXY:-}" ]] && echo "HTTPS_PROXY=${HTTPS_PROXY}" >> "$env_file"
+    [[ -n "${NO_PROXY:-}" ]]    && echo "NO_PROXY=${NO_PROXY}" >> "$env_file"
+
+    chmod 600 "$env_file"
+}
+
+# --- Main ---
+echo "=== tink-agent-setup: starting ==="
+parse_cmdline
+
+echo "  Image:          ${TINK_IMAGE}"
+echo "  GRPC Authority: ${GRPC_AUTHORITY:-not set}"
+echo "  Worker ID:      ${WORKER_ID:-not set}"
+echo "  Syslog Host:    ${SYSLOG_HOST:-not set}"
+
+wait_for_containerd
+configure_insecure_registries
+pull_image
+extract_binary
+write_env_file
+
+echo "=== tink-agent-setup: complete ==="

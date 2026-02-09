@@ -1,0 +1,18 @@
+# Build outputs
+mkosi.output/
+mkosi.cache/
+mkosi.tools/
+mkosi.tools.manifest
+mkosi.builddir/
+config/.config.resolved.*
+out/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

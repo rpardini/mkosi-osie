@@ -1,0 +1,22 @@
+#!/bin/bash
+# /usr/local/bin/tink-agent-start — Launch tink-agent with proper flags.
+# Environment variables are loaded by systemd from /etc/tink-agent.env.
+
+set -euo pipefail
+
+ARGS=(
+    -runtime containerd
+    -containerd-socket /run/containerd/containerd.sock
+    -transport grpc
+)
+
+[[ -n "${TINKERBELL_GRPC_AUTHORITY:-}" ]] && ARGS+=(-grpc-server "$TINKERBELL_GRPC_AUTHORITY")
+[[ -n "${TINKERBELL_TLS:-}" ]]            && ARGS+=(-grpc-tls="$TINKERBELL_TLS")
+[[ -n "${TINKERBELL_INSECURE_TLS:-}" ]]   && ARGS+=(-grpc-insecure-tls="$TINKERBELL_INSECURE_TLS")
+[[ -n "${WORKER_ID:-}" ]]                 && ARGS+=(-id "$WORKER_ID")
+[[ -n "${DOCKER_REGISTRY:-}" ]]           && ARGS+=(-registry-name "$DOCKER_REGISTRY")
+[[ -n "${REGISTRY_USERNAME:-}" ]]         && ARGS+=(-registry-user "$REGISTRY_USERNAME")
+[[ -n "${REGISTRY_PASSWORD:-}" ]]         && ARGS+=(-registry-pass "$REGISTRY_PASSWORD")
+
+echo "Starting tink-agent with: ${ARGS[*]}"
+exec /tink-agent "${ARGS[@]}"

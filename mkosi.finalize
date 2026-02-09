@@ -1,0 +1,31 @@
+#!/bin/bash
+# mkosi.finalize — Runs after the image is assembled but before output.
+# The root filesystem is writable here.
+set -euo pipefail
+
+echo "==> CaptainOS finalize: unlocking root account..."
+
+# Unlock root with empty password
+# Replace the locked root entry (! or * in password field) with empty hash
+if [[ -f "$BUILDROOT/etc/shadow" ]]; then
+    sed -i 's|^root:[^:]*:|root::|' "$BUILDROOT/etc/shadow"
+    echo "    root account unlocked (empty password)"
+fi
+
+# Ensure /etc/initrd-release does not exist
+rm -f "$BUILDROOT/etc/initrd-release"
+echo "    /etc/initrd-release removed"
+
+# Remove systemd-firstboot completely
+rm -f "$BUILDROOT/usr/lib/systemd/system/systemd-firstboot.service"
+rm -f "$BUILDROOT/usr/lib/systemd/system/sysinit.target.wants/systemd-firstboot.service"
+rm -f "$BUILDROOT/usr/bin/systemd-firstboot"
+echo "    systemd-firstboot removed"
+
+# Ensure /init (switch_root script) is executable
+if [[ -f "$BUILDROOT/init" ]]; then
+    chmod +x "$BUILDROOT/init"
+    echo "    /init made executable"
+fi
+
+echo "==> CaptainOS finalize complete."
