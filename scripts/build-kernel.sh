@@ -18,10 +18,11 @@ fi
 KVER="$KERNEL_VERSION"
 ARCH="${ARCH:-amd64}"
 
-# Map ARCH to kernel ARCH
+# Map ARCH to kernel ARCH; determine the correct KBuild target for the arch
+declare KBUILD_TARGETS_ARCH="undetermined"
 case "$ARCH" in
-    amd64|x86_64)  KARCH="x86_64"; CROSS_COMPILE="" ;;
-    arm64|aarch64) KARCH="arm64";  CROSS_COMPILE="aarch64-linux-gnu-" ;;
+    amd64|x86_64)  KARCH="x86_64"; CROSS_COMPILE=""; KBUILD_TARGETS_ARCH="bzImage"; ;;
+    arm64|aarch64) KARCH="arm64";  CROSS_COMPILE="aarch64-linux-gnu-";  KBUILD_TARGETS_ARCH="Image"; ;;
     *)             echo "ERROR: Unsupported ARCH=$ARCH"; exit 1 ;;
 esac
 
@@ -74,7 +75,7 @@ NPROC=$(nproc)
 echo "==> Building kernel with ${NPROC} jobs..."
 make ARCH="$KARCH" ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} \
     -j"$NPROC" \
-    bzImage modules
+    ${KBUILD_TARGETS_ARCH} modules
 
 # --- Determine actual kernel version from build ---
 BUILT_KVER=$(make -s ARCH="$KARCH" kernelrelease)
