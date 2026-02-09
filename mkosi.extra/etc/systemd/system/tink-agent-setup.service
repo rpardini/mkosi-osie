@@ -14,8 +14,8 @@ ExecStart=/usr/local/bin/tink-agent-setup
 TimeoutStartSec=300
 
 # Logging
-StandardOutput=journal+console
-StandardError=journal+console
+StandardOutput=journal
+StandardError=journal
 SyslogIdentifier=tink-agent-setup
 
 [Install]
